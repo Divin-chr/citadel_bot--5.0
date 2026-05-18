@@ -4,7 +4,10 @@ Forex & Indices | MetaTrader 5 | Buffer-Delayed Prediction Engine
 """
 
 import asyncio
+import hmac
 import os
+import platform
+import secrets
 import signal
 import subprocess
 import sys
@@ -12,19 +15,20 @@ import threading
 import time
 from pathlib import Path
 
-from flask import Flask, jsonify
+# Support execution as a script from inside the package folder (py main.py)
+if __name__ == "__main__" and __package__ is None:
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+# Workaround for Windows environments where platform.system() hits broken
+# WMI queries during package import (aiohttp / metaapi_cloud_sdk import path).
+if os.name == "nt":
+    platform.system = lambda: "Windows"
+
+from flask import Flask, abort, jsonify, request
 from metaapi_cloud_sdk import MetaApi
 
 from citadel_bot.config import BotConfig
-from citadel_bot.data_pipeline import DataPipeline
-from citadel_bot.buffer_engine import AdaptiveBuffer
-from citadel_bot.technical_analysis import TechnicalAnalyzer
-from citadel_bot.prediction_engine import PredictionEngine
-from citadel_bot.signal_generator import SignalGenerator
-from citadel_bot.execution_engine import ExecutionEngine
-from citadel_bot.risk_manager import RiskManager
-from citadel_bot.database.database_manager import init_database, close_database
-from citadel_bot.signal_logger import SignalLogger
+from citadel_bot.auth_store import AuthError, get_auth_store
 from citadel_bot.utils.logger import setup_logger
 
 log = setup_logger("main")
@@ -32,6 +36,34 @@ log = setup_logger("main")
 app = Flask('')
 _supervisor = None
 _supervisor_loop = None
+
+
+def _require_control_api_key():
+    expected = os.getenv("CITADEL_CONTROL_API_KEY", "")
+    if not expected:
+        return
+    supplied = request.headers.get("X-Citadel-Api-Key", "")
+    if not hmac.compare_digest(supplied, expected):
+        abort(401)
+
+
+def _request_user_id() -> int:
+    data = request.get_json(silent=True) or {}
+    user_id = data.get("user_id") or request.args.get("user_id")
+    try:
+        user_id = int(user_id)
+    except (TypeError, ValueError):
+        abort(400, "user_id is required")
+    if user_id <= 0:
+        abort(400, "user_id is required")
+    return user_id
+
+
+def _mask(value: str, visible: int = 4) -> str:
+    value = str(value or "")
+    if len(value) <= visible:
+        return "<configured>" if value else "<not configured>"
+    return f"...{value[-visible:]}"
 
 
 def _run_coro(coro, timeout=30):
@@ -43,50 +75,168 @@ def _run_coro(coro, timeout=30):
 
 @app.route('/')
 def home():
-    status = _supervisor.status() if _supervisor else {"running": False}
-    return jsonify({"service": "citadel-bot", **status})
+    return jsonify({"service": "citadel-bot", "multi_tenant": True})
 
 
 @app.route('/api/status')
 def api_status():
-    return jsonify(_supervisor.status() if _supervisor else {"running": False})
+    _require_control_api_key()
+    user_id = _request_user_id()
+    return jsonify(_supervisor.status(user_id) if _supervisor else {"running": False})
 
 
 @app.route('/api/account')
 def api_account():
-    return jsonify(_supervisor.account_info() if _supervisor else {"error": "Supervisor unavailable"})
+    _require_control_api_key()
+    user_id = _request_user_id()
+    return jsonify(_supervisor.account_info(user_id) if _supervisor else {"error": "Supervisor unavailable"})
 
 
 @app.route('/api/positions')
 def api_positions():
-    return jsonify(_supervisor.open_positions() if _supervisor else [])
+    _require_control_api_key()
+    user_id = _request_user_id()
+    return jsonify(_supervisor.open_positions(user_id) if _supervisor else [])
 
 
 @app.post('/api/start')
 def api_start():
-    result = _run_coro(_supervisor.start())
+    _require_control_api_key()
+    user_id = _request_user_id()
+    result = _run_coro(_supervisor.start(user_id))
     return jsonify(result)
 
 
 @app.post('/api/stop')
 def api_stop():
-    result = _run_coro(_supervisor.stop())
+    _require_control_api_key()
+    user_id = _request_user_id()
+    result = _run_coro(_supervisor.stop(user_id))
     return jsonify(result)
 
 
 @app.post('/api/reload-config')
 def api_reload_config():
-    return jsonify(_supervisor.reload_config() if _supervisor else {"success": False, "message": "Supervisor unavailable"})
+    _require_control_api_key()
+    user_id = _request_user_id()
+    return jsonify(_supervisor.reload_config(user_id) if _supervisor else {"success": False, "message": "Supervisor unavailable"})
+
+
+@app.post('/api/credentials')
+def api_credentials():
+    _require_control_api_key()
+    if not _supervisor:
+        return jsonify({"success": False, "message": "Supervisor unavailable"}), 503
+    user_id = _request_user_id()
+    data = request.get_json(silent=True) or {}
+    token = str(data.get("metaapi_token") or "").strip()
+    account_id = str(data.get("metaapi_account_id") or "").strip()
+    if not token or not account_id:
+        return jsonify({"success": False, "message": "MetaApi token and account ID are required"}), 400
+    try:
+        get_auth_store().save_credentials(user_id, token, account_id)
+        _supervisor.reload_config(user_id)
+        return jsonify({"success": True, "message": "MetaApi credentials applied"})
+    except AuthError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
+
+
+@app.post('/api/config')
+def api_save_config():
+    _require_control_api_key()
+    user_id = _request_user_id()
+    data = request.get_json(silent=True) or {}
+    config_data = data.get("config") or {}
+    config = BotConfig.from_dict(config_data, apply_environment=True)
+    get_auth_store().save_config(user_id, config)
+    return jsonify(_supervisor.reload_config(user_id) if _supervisor else {"success": True})
+
+
+def _get_control_api_setting(name: str, default: str = "") -> str:
+    return os.environ.get(name, default).strip()
 
 
 def run_control_api(host='127.0.0.1', port=8765):
-    app.run(host=host, port=port)
+    ssl_cert = _get_control_api_setting("CITADEL_CONTROL_API_SSL_CERT")
+    ssl_key = _get_control_api_setting("CITADEL_CONTROL_API_SSL_KEY")
+    ssl_context = (ssl_cert, ssl_key) if ssl_cert and ssl_key else None
+    app.run(host=host, port=port, ssl_context=ssl_context)
+
+
+def _control_api_scheme() -> str:
+    scheme = _get_control_api_setting("CITADEL_CONTROL_API_SCHEME")
+    if scheme:
+        return scheme.lower()
+    return "https" if _get_control_api_setting("CITADEL_CONTROL_API_SSL_CERT") and _get_control_api_setting("CITADEL_CONTROL_API_SSL_KEY") else "http"
+
+
+def _control_api_host() -> str:
+    return _get_control_api_setting("CITADEL_CONTROL_API_HOST", "127.0.0.1")
+
+
+def _control_api_port() -> int:
+    return int(_get_control_api_setting("CITADEL_CONTROL_API_PORT", "8765"))
+
+
+def _control_api_path() -> str:
+    path = _get_control_api_setting("CITADEL_CONTROL_API_PATH", "/api")
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return path
+
+
+def _dashboard_base_path() -> str:
+    path = _get_control_api_setting("CITADEL_DASHBOARD_BASE_PATH", "/dashboard")
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return path
 
 
 def keep_alive(port=None, host='0.0.0.0'):
     selected_port = int(port or os.environ.get("PORT", "8080"))
-    t = threading.Thread(target=run_control_api, kwargs={"host": host, "port": selected_port}, daemon=True)
+    t = threading.Thread(
+        target=run_control_api,
+        kwargs={"host": host, "port": selected_port},
+        daemon=True,
+    )
     t.start()
+
+
+def start_dashboard(control_port: int) -> subprocess.Popen:
+    dashboard_path = Path(__file__).resolve().parent / "dashboard.py"
+    port = os.environ.get("PORT", "8501")
+    env = os.environ.copy()
+    control_scheme = _control_api_scheme()
+    control_host = _control_api_host()
+    control_port_env = _control_api_port()
+    control_path = _control_api_path()
+    base_path = _dashboard_base_path()
+
+    env["CITADEL_CONTROL_API_URL"] = f"{control_scheme}://{control_host}:{control_port_env}{control_path}"
+    cmd = [
+        sys.executable,
+        "-m",
+        "streamlit",
+        "run",
+        str(dashboard_path),
+        "--server.address=0.0.0.0",
+        f"--server.port={port}",
+        "--server.headless=true",
+    ]
+
+    if base_path:
+        cmd.append(f"--server.baseUrlPath={base_path}")
+
+    if control_scheme == "https":
+        cert_file = _get_control_api_setting("CITADEL_CONTROL_API_SSL_CERT")
+        key_file = _get_control_api_setting("CITADEL_CONTROL_API_SSL_KEY")
+        if cert_file and key_file:
+            cmd.extend([
+                f"--server.sslCertFile={cert_file}",
+                f"--server.sslKeyFile={key_file}",
+            ])
+    log.info("Starting dashboard on port %s", port)
+    return subprocess.Popen(cmd, env=env)
 
 
 class CitadelBot:
@@ -103,6 +253,15 @@ class CitadelBot:
         self.running = False
 
         # Core modules
+        from citadel_bot.data_pipeline import DataPipeline
+        from citadel_bot.buffer_engine import AdaptiveBuffer
+        from citadel_bot.technical_analysis import TechnicalAnalyzer
+        from citadel_bot.prediction_engine import PredictionEngine
+        from citadel_bot.signal_generator import SignalGenerator
+        from citadel_bot.execution_engine import ExecutionEngine
+        from citadel_bot.risk_manager import RiskManager
+        from citadel_bot.signal_logger import SignalLogger
+
         self.pipeline   = DataPipeline(config, account, connection)
         self.buffer     = AdaptiveBuffer(config)
         self.analyzer   = TechnicalAnalyzer(config)
@@ -128,7 +287,7 @@ class CitadelBot:
         log.info("=" * 60)
         log.info("  CITADEL QUANT BOT  |  v2.2  |  %s MODE", self.config.mode.upper())
         log.info("  Instruments : %s", ", ".join(self.config.instruments))
-        log.info("  MetaApi account: %s", self.config.metaapi_account_id or "<not configured>")
+        log.info("  MetaApi account: %s", _mask(self.config.metaapi_account_id))
         log.info("  Features    : Kelly=%s | TrailingStop=%s | SignalLog=%s | Database=%s",
                   self.config.use_kelly_sizing, self.config.trailing_stop_after_tp1,
                   self.config.signal_logging, "Enabled" if self._db_initialized else "Disabled")
@@ -160,6 +319,8 @@ class CitadelBot:
         """Initialize database connections for all components"""
         try:
             # Initialize global database manager
+            from citadel_bot.database.database_manager import init_database
+
             await init_database({
                 "host": self.config.database_host,
                 "port": self.config.database_port,
@@ -288,21 +449,20 @@ class CitadelBot:
         await self.executor.cancel_all_orders()
         await self.executor.disconnect()
 
-        # Close database connections
-        if self._db_initialized:
-            await close_database()
-            log.info("Database connections closed.")
+        # Database pool is process-wide and may be shared by other tenants.
+        # It is closed by process shutdown, not by an individual bot stop.
 
         log.info("Bot stopped cleanly.")
 
-class BotSupervisor:
+class UserBotSupervisor:
     """Owns the long-running bot task for the dashboard/control API."""
 
-    def __init__(self):
+    def __init__(self, user_id: int):
+        self.user_id = user_id
         self.bot = None
         self.account = None
         self.connection = None
-        self.config = BotConfig.from_file("config.yaml")
+        self.config = get_auth_store().get_config(user_id)
         self.task = None
         self.starting = False
         self.last_error = None
@@ -320,7 +480,7 @@ class BotSupervisor:
 
     async def _run(self):
         try:
-            self.config = BotConfig.from_file("config.yaml")
+            self.config = get_auth_store().get_config(self.user_id)
             self.account, self.connection = await create_metaapi_connection(self.config)
             self.bot = CitadelBot(self.config, self.account, self.connection)
             await self.bot.start()
@@ -356,7 +516,7 @@ class BotSupervisor:
         return {"success": True, "message": "Bot stopped"}
 
     def reload_config(self):
-        self.config = BotConfig.from_file("config.yaml")
+        self.config = get_auth_store().get_config(self.user_id)
         if self.task and not self.task.done():
             return {
                 "success": True,
@@ -374,6 +534,7 @@ class BotSupervisor:
         return {
             "running": running,
             "starting": self.starting,
+            "user_id": self.user_id,
             "instruments": self.config.instruments,
             "mode": self.config.mode,
             "metaapi_connected": self.connection is not None,
@@ -423,30 +584,47 @@ class BotSupervisor:
             return []
 
 
-def start_dashboard(control_port: int) -> subprocess.Popen:
-    dashboard_path = Path(__file__).resolve().parent / "dashboard.py"
-    port = os.environ.get("PORT", "8501")
-    env = os.environ.copy()
-    env["CITADEL_CONTROL_API_URL"] = f"http://127.0.0.1:{control_port}"
-    cmd = [
-        sys.executable,
-        "-m",
-        "streamlit",
-        "run",
-        str(dashboard_path),
-        "--server.address=0.0.0.0",
-        f"--server.port={port}",
-        "--server.headless=true",
-    ]
-    log.info("Starting dashboard on port %s", port)
-    return subprocess.Popen(cmd, env=env)
+class BotSupervisorManager:
+    """Multiplexes independent bot supervisors per tenant/user."""
+
+    def __init__(self):
+        self._supervisors = {}
+
+    def _get(self, user_id: int) -> UserBotSupervisor:
+        if user_id not in self._supervisors:
+            self._supervisors[user_id] = UserBotSupervisor(user_id)
+        return self._supervisors[user_id]
+
+    async def start(self, user_id: int):
+        return await self._get(user_id).start()
+
+    async def stop(self, user_id: int):
+        return await self._get(user_id).stop()
+
+    async def stop_all(self):
+        results = []
+        for supervisor in list(self._supervisors.values()):
+            results.append(await supervisor.stop())
+        return results
+
+    def reload_config(self, user_id: int):
+        return self._get(user_id).reload_config()
+
+    def status(self, user_id: int):
+        return self._get(user_id).status()
+
+    def account_info(self, user_id: int):
+        return self._get(user_id).account_info()
+
+    def open_positions(self, user_id: int):
+        return self._get(user_id).open_positions()
 
 
-# -----------------------------------------------------------------------
 async def main():
     global _supervisor, _supervisor_loop
     _supervisor_loop = asyncio.get_running_loop()
-    _supervisor = BotSupervisor()
+    _supervisor = BotSupervisorManager()
+    os.environ.setdefault("CITADEL_CONTROL_API_KEY", secrets.token_urlsafe(32))
 
     run_dashboard = os.getenv("CITADEL_RUN_DASHBOARD", "true").lower() not in {"0", "false", "no"}
     control_port = int(os.getenv("CITADEL_CONTROL_PORT", "8765"))
@@ -462,15 +640,17 @@ async def main():
 
     def _shutdown(sig, frame):
         log.info("Signal %s received — stopping.", sig)
-        loop.create_task(_supervisor.stop())
+        loop.create_task(_supervisor.stop_all())
         if dashboard_process:
             dashboard_process.terminate()
 
     signal.signal(signal.SIGINT,  _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    if os.getenv("CITADEL_AUTOSTART_BOT", "true").lower() not in {"0", "false", "no"}:
-        await _supervisor.start()
+    if os.getenv("CITADEL_AUTOSTART_BOT", "false").lower() not in {"0", "false", "no"}:
+        autostart_user = int(os.getenv("CITADEL_AUTOSTART_USER_ID", "0") or "0")
+        if autostart_user > 0:
+            await _supervisor.start(autostart_user)
 
     try:
         while True:
@@ -478,7 +658,7 @@ async def main():
                 raise RuntimeError(f"Dashboard exited with code {dashboard_process.returncode}")
             await asyncio.sleep(2)
     finally:
-        await _supervisor.stop()
+        await _supervisor.stop_all()
         if dashboard_process and dashboard_process.poll() is None:
             dashboard_process.terminate()
 

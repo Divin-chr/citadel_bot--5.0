@@ -23,6 +23,7 @@ class DatabaseManager:
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = self._build_config(config)
         self.pool: Optional[asyncpg.Pool] = None
+        self._column_cache: Dict[tuple[str, str], bool] = {}
 
     def configure(self, config: Optional[Dict[str, Any]] = None):
         """Refresh settings without replacing the global manager object."""
@@ -111,6 +112,7 @@ class DatabaseManager:
             return
         try:
             self.pool = await asyncpg.create_pool(**self.config)
+            await self._ensure_multitenant_columns()
             log.info("✅ Database connection pool initialized")
         except Exception as e:
             log.error(f"❌ Failed to initialize database pool: {e}")
@@ -223,9 +225,13 @@ class DatabaseManager:
     async def insert_signal_log(self, signal_data: Dict):
         """Insert signal log entry"""
         async with self.connection() as conn:
+            has_user_id = await self._has_column(conn, "signal_logs", "user_id")
+            user_columns = "user_id, " if has_user_id else ""
+            user_values = "$1, " if has_user_id else ""
+            offset = 1 if has_user_id else 0
             await conn.execute("""
                 INSERT INTO signal_logs (
-                    timestamp_utc, instrument_id, score_trend, score_momentum,
+                    """ + user_columns + """timestamp_utc, instrument_id, score_trend, score_momentum,
                     score_acceleration, score_volatility, score_structure,
                     trend_daily, trend_weekly, trend_monthly, rsi, macd_hist,
                     macd_cross, bb_pct, bb_squeeze, atr, atr_pct, volume_ratio,
@@ -234,11 +240,10 @@ class DatabaseManager:
                     delta_aligned, alignment_score, signal_emitted, rejection_gate,
                     entry_price, stop_loss, tp1, tp2, rr_ratio, vol_regime
                 ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                    $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
-                    $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35
+                    """ + user_values + ", ".join(f"${i + offset}" for i in range(1, 36)) + """
                 )
             """,
+            *([signal_data.get('user_id')] if has_user_id else []),
             signal_data['timestamp_utc'],
             signal_data['instrument_id'],
             signal_data.get('score_trend'),
@@ -283,14 +288,19 @@ class DatabaseManager:
     async def insert_trade_ledger_entry(self, trade_data: Dict):
         """Insert trade ledger entry"""
         async with self.connection() as conn:
+            has_user_id = await self._has_column(conn, "trade_ledger", "user_id")
+            user_columns = "user_id, " if has_user_id else ""
+            user_values = "$1, " if has_user_id else ""
+            offset = 1 if has_user_id else 0
             await conn.execute("""
                 INSERT INTO trade_ledger (
-                    timestamp_utc, event_type, mode, instrument_id,
+                    """ + user_columns + """timestamp_utc, event_type, mode, instrument_id,
                     parent_order_id, order_id, direction, qty_delta,
                     qty_open, fill_price, pnl_delta_usd, realized_pnl_usd,
                     status, note
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                ) VALUES (""" + user_values + ", ".join(f"${i + offset}" for i in range(1, 15)) + """)
             """,
+            *([trade_data.get('user_id')] if has_user_id else []),
             trade_data['timestamp_utc'],
             trade_data['event_type'],
             trade_data['mode'],
@@ -368,6 +378,30 @@ class DatabaseManager:
             return True
         except Exception:
             return False
+
+    async def _has_column(self, conn, table: str, column: str) -> bool:
+        key = (table, column)
+        if key not in self._column_cache:
+            exists = await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_name = $1 AND column_name = $2
+                )
+                """,
+                table,
+                column,
+            )
+            self._column_cache[key] = bool(exists)
+        return self._column_cache[key]
+
+    async def _ensure_multitenant_columns(self):
+        async with self.connection() as conn:
+            await conn.execute("ALTER TABLE IF EXISTS signal_logs ADD COLUMN IF NOT EXISTS user_id INTEGER")
+            await conn.execute("ALTER TABLE IF EXISTS trade_ledger ADD COLUMN IF NOT EXISTS user_id INTEGER")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_logs_user ON signal_logs(user_id)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_ledger_user ON trade_ledger(user_id)")
 
     async def get_stats(self) -> Dict:
         """Get database statistics"""

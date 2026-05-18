@@ -1,0 +1,18 @@
+version: "3.9"
+
+services:
+  citadel:
+    image: YOUR_DOCKERHUB_USERNAME/citadel_bot:latest
+    container_name: citadel-bot
+    restart: unless-stopped
+    environment:
+      CITADEL_CONTROL_API_KEY: "replace_with_secure_random_value"
+      CITADEL_CONTROL_API_HOST: "app.yourdomain.com"
+      CITADEL_CONTROL_API_PORT: "443"
+      CITADEL_CONTROL_API_SCHEME: "https"
+      CITADEL_CONTROL_API_PATH: "/api"
+      CITADEL_DASHBOARD_BASE_PATH: "/dashboard"
+
+networks:
+  citadel:
+    external: false

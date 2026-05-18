@@ -3,6 +3,7 @@ config.py — Bot configuration dataclass.
 Edit config.yaml to change settings; this module loads + validates it.
 """
 
+import dataclasses
 import os
 import yaml
 from dataclasses import dataclass, field
@@ -15,6 +16,8 @@ load_dotenv()
 
 @dataclass
 class BotConfig:
+    user_id: Optional[int] = None
+
     # ─── Database connection ───────────────────────────────────────────────────────────────────
     database_host: str = ""
     database_port: int = 5432
@@ -25,7 +28,7 @@ class BotConfig:
     # ── MetaApi connection ───────────────────────────────────────────────
     metaapi_token: str = ""
     metaapi_account_id: str = ""
-    mode: str = ""            # "paper" | "live"
+    mode: str = "paper"       # "paper" | "live"
 
     # ── Instruments ──────────────────────────────────────────────────
     # Populated from dashboard or config.yaml.
@@ -123,6 +126,8 @@ class BotConfig:
         if not p.exists():
             cfg = cls()
             cfg.save(path)
+            cfg._apply_environment_overrides()
+            cfg._hydrate_from_catalog()
             return cfg
         with open(p, encoding="utf-8-sig") as f:
             data = yaml.safe_load(f) or {}
@@ -149,20 +154,37 @@ class BotConfig:
         """Fail fast with a useful error if MetaApi credentials are missing."""
         missing = []
         if not self.metaapi_token:
-            missing.append("CITADEL_METAAPI_TOKEN")
+            missing.append("MetaApi token")
         if not self.metaapi_account_id:
-            missing.append("CITADEL_METAAPI_ACCOUNT_ID")
+            missing.append("MetaApi account ID")
         if missing:
             raise RuntimeError(
-                "MetaApi credentials are missing. Set these environment variables: "
+                "MetaApi credentials are missing. Log in with: "
                 + ", ".join(missing)
             )
 
-    def save(self, path: str = "config.yaml"):
-        import dataclasses
-        d = dataclasses.asdict(self)
+    def save(self, path: str = "config.yaml", include_secrets: bool = False):
+        d = self.to_dict(include_secrets=include_secrets)
         with open(path, "w", encoding="utf-8") as f:
             yaml.dump(d, f, default_flow_style=False, sort_keys=True)
+
+    def to_dict(self, include_secrets: bool = False) -> Dict:
+        d = dataclasses.asdict(self)
+        if not include_secrets:
+            for key in ("metaapi_token", "metaapi_account_id", "database_password"):
+                d[key] = ""
+        return d
+
+    @classmethod
+    def from_dict(cls, data: Optional[Dict] = None, apply_environment: bool = True) -> "BotConfig":
+        cfg = cls()
+        for k, v in (data or {}).items():
+            if hasattr(cfg, k):
+                setattr(cfg, k, v)
+        if apply_environment:
+            cfg._apply_environment_overrides()
+        cfg._hydrate_from_catalog()
+        return cfg
 
     # ------------------------------------------------------------------
     def _hydrate_from_catalog(self):

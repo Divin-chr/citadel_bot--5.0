@@ -223,6 +223,7 @@ class SignalLogger:
             # No conversion needed for these
             
             db_signal_data['instrument_id'] = instrument_id
+            db_signal_data['user_id'] = self.config.user_id
             await db_manager.insert_signal_log(db_signal_data)
 
         except Exception as e:

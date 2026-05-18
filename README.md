@@ -109,6 +109,29 @@ python launch_dashboard.py
 streamlit run citadel_bot/dashboard.py
 ```
 
+For local HTTPS support, set the dashboard TLS cert and key before launching:
+
+```bash
+set CITADEL_DASHBOARD_ENABLE_HTTPS=true
+set CITADEL_DASHBOARD_SSL_CERT=path\to\cert.pem
+set CITADEL_DASHBOARD_SSL_KEY=path\to\key.pem
+python launch_dashboard.py
+```
+
+Or use Traefik with Docker Compose to secure and proxy both the dashboard and control API:
+
+```bash
+docker compose up --build
+```
+
+Then open in your browser:
+- `https://dashboard.localhost`
+- `https://api.localhost`
+
+See `docs/TRAEFIK_SETUP.md` for full Traefik setup instructions.
+
+Then open your browser to `https://localhost:8501`.
+
 The dashboard provides:
 - **🔐 Secure login** (environment-based credentials)
 - **📊 Real-time metrics** (equity, balance, P&L)
@@ -120,8 +143,9 @@ The dashboard provides:
 - **⚠️ Risk monitoring** (utilization + suggestions)
 
 **Credentials:**
-- Default: `admin` / `change_me_now`
-- Production: Set `CITADEL_DASHBOARD_USER` and `CITADEL_DASHBOARD_PASS` environment variables
+- Sign up or log in with a platform user account.
+- Add each user's MetaApi token and account ID in Settings; tokens are encrypted at rest.
+- Production: set `CITADEL_SECRET_KEY`, `CITADEL_AUTH_DB_PATH`, and `CITADEL_CONTROL_API_KEY` in your deployment secret store.
 
 See [DASHBOARD_GUIDE.md](DASHBOARD_GUIDE.md) for full documentation and troubleshooting.
 
@@ -296,3 +320,8 @@ citadel_bot/
 This software is for educational purposes. Trading futures involves substantial
 risk of loss. Past performance is not indicative of future results. Always trade
 with capital you can afford to lose.
+
+docker pull your-username/citadel_bot:latest
+docker run -d --name citadel \
+-p 8080:8080 -p 8501:8501 -p 8765:8765 \
+your-username/citadel_bot:latest

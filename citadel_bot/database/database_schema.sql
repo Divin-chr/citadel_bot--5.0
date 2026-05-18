@@ -54,6 +54,7 @@ CREATE INDEX idx_market_data_timeframe ON market_data(timeframe);
 
 CREATE TABLE signal_logs (
     signal_id BIGSERIAL PRIMARY KEY,
+    user_id INTEGER,
     timestamp_utc TIMESTAMP WITH TIME ZONE NOT NULL,
     instrument_id INTEGER NOT NULL REFERENCES instruments(instrument_id),
 
@@ -106,6 +107,7 @@ CREATE TABLE signal_logs (
 );
 
 CREATE INDEX idx_signal_logs_timestamp ON signal_logs(timestamp_utc DESC);
+CREATE INDEX idx_signal_logs_user ON signal_logs(user_id);
 CREATE INDEX idx_signal_logs_instrument ON signal_logs(instrument_id);
 CREATE INDEX idx_signal_logs_composite_score ON signal_logs(composite_score);
 CREATE INDEX idx_signal_logs_signal_emitted ON signal_logs(signal_emitted);
@@ -116,6 +118,7 @@ CREATE INDEX idx_signal_logs_signal_emitted ON signal_logs(signal_emitted);
 
 CREATE TABLE trade_ledger (
     trade_id BIGSERIAL PRIMARY KEY,
+    user_id INTEGER,
     timestamp_utc TIMESTAMP WITH TIME ZONE NOT NULL,
     event_type VARCHAR(20) NOT NULL CHECK (event_type IN ('ENTRY_FILL', 'EXIT_FILL', 'POSITION_CLOSED', 'MODIFY')),
     mode VARCHAR(10) NOT NULL CHECK (mode IN ('paper', 'live')),
@@ -143,6 +146,7 @@ CREATE TABLE trade_ledger (
 );
 
 CREATE INDEX idx_trade_ledger_timestamp ON trade_ledger(timestamp_utc DESC);
+CREATE INDEX idx_trade_ledger_user ON trade_ledger(user_id);
 CREATE INDEX idx_trade_ledger_instrument ON trade_ledger(instrument_id);
 CREATE INDEX idx_trade_ledger_mode ON trade_ledger(mode);
 CREATE INDEX idx_trade_ledger_order_id ON trade_ledger(order_id);

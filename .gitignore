@@ -1,0 +1,53 @@
+# Secrets and local credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# MetaApi local cache/session artifacts
+.metaapi/
+**/.metaapi/
+
+# Runtime logs and generated state
+logs/
+**/logs/
+*.log
+data/
+**/data/
+buffer_delays.json
+buffer_calibration_diagnostics.json
+
+# Local runtime configuration
+config.yaml
+citadel_bot/config.yaml
+citadel_bot/config/config.yaml
+
+# Python
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Local editor/OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Build/package output
+build/
+dist/
+*.egg-info/

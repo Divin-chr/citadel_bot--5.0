@@ -23,10 +23,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from citadel_bot.config.config import BotConfig
+from citadel_bot.auth_store import AuthError, get_auth_store
 from citadel_bot.database.database_manager import db_manager
 from citadel_bot.utils.logger import get_logger
 from citadel_bot.utils.instrument_catalog import CATALOG, list_by_category, all_categories
-from citadel_bot.dashboard_service import get_dashboard_service
+from citadel_bot.dashboard_service import DashboardService
+
+CONTROL_API_KEY_ENV = "CITADEL_CONTROL_API_KEY"
 
 # Page configuration
 st.set_page_config(
@@ -36,58 +39,129 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Authentication
+def _auth_headers() -> dict:
+    api_key = os.getenv(CONTROL_API_KEY_ENV, "")
+    return {"X-Citadel-Api-Key": api_key} if api_key else {}
+
+
 def check_password():
-    """Returns `True` if the user had the correct password."""
-
-    def password_entered():
-        """Checks whether a password entered by the user is correct."""
-        if st.session_state["username"] == os.getenv("CITADEL_DASHBOARD_USER", "divin") and \
-           st.session_state["password"] == os.getenv("CITADEL_DASHBOARD_PASS", "change_me_now"):
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]  # don't store password
-        else:
-            st.session_state["password_correct"] = False
-
-    if "password_correct" not in st.session_state:
-        st.text_input("Username", key="username")
-        st.text_input("Password", type="password", key="password")
-        st.button("Login", on_click=password_entered)
-        return False
-    elif not st.session_state["password_correct"]:
-        st.text_input("Username", key="username")
-        st.text_input("Password", type="password", key="password")
-        st.error("😕 User not known or password incorrect")
-        st.button("Login", on_click=password_entered)
-        return False
-    else:
+    """Authenticate a tenant user with signup and login flows."""
+    store = get_auth_store()
+    token = st.session_state.get("session_token", "")
+    user = store.get_user_by_session(token)
+    if user:
+        st.session_state["user"] = user
         return True
+
+    st.title("Citadel Bot")
+    st.caption("Sign in or create an account to manage your isolated trading bot.")
+
+    login_tab, signup_tab = st.tabs(["Login", "Sign Up"])
+
+    with login_tab:
+        with st.form("tenant_login"):
+            email = st.text_input("Email", key="login_email")
+            password = st.text_input("Password", type="password", key="login_password")
+            submitted = st.form_submit_button("Login", type="primary")
+        if submitted:
+            try:
+                user, session_token = store.authenticate(email, password)
+                st.session_state["session_token"] = session_token
+                st.session_state["user"] = user
+                st.rerun()
+            except AuthError as exc:
+                st.error(str(exc))
+
+    with signup_tab:
+        with st.form("tenant_signup"):
+            name = st.text_input("Display Name", key="signup_name")
+            email = st.text_input("Email", key="signup_email")
+            password = st.text_input("Password", type="password", key="signup_password")
+            confirm = st.text_input("Confirm Password", type="password", key="signup_confirm")
+            submitted = st.form_submit_button("Create Account", type="primary")
+        if submitted:
+            if password != confirm:
+                st.error("Passwords do not match.")
+            else:
+                try:
+                    store.create_user(email, password, name)
+                    user, session_token = store.authenticate(email, password)
+                    st.session_state["session_token"] = session_token
+                    st.session_state["user"] = user
+                    st.rerun()
+                except AuthError as exc:
+                    st.error(str(exc))
+
+    return False
+
 
 # Bot control class
 class BotController:
     def __init__(self):
         self.bot_process = None
         self.is_running = False
-        self.config = BotConfig.from_file("config.yaml")
+        self.user = st.session_state.get("user")
+        self.user_id = self.user.user_id if self.user else None
+        self.auth_store = get_auth_store()
+        self.config = self.auth_store.get_config(self.user_id) if self.user_id else BotConfig.from_file("config.yaml")
         self.logger = get_logger("dashboard")
         self.config_path = Path("config.yaml")
-        self.dashboard_service = get_dashboard_service()
+        self.dashboard_service = DashboardService(self.user_id)
         self.bot_instance = None
         self.bot_loop = None
         self.bot_thread = None
         self.bot_task = None
         self.control_api_url = os.getenv("CITADEL_CONTROL_API_URL", "").rstrip("/")
+        self.verify_ssl = os.getenv("CITADEL_CONTROL_API_VERIFY_SSL", "true").lower() not in {"0", "false", "no"}
 
-    def _control_request(self, method: str, path: str, default):
+    def _control_request(self, method: str, path: str, default, json=None, params=None):
         if not self.control_api_url:
             return default
+        payload = dict(json or {})
+        query = dict(params or {})
+        if self.user_id:
+            if method.upper() == "GET":
+                query.setdefault("user_id", self.user_id)
+            else:
+                payload.setdefault("user_id", self.user_id)
         try:
-            response = requests.request(method, f"{self.control_api_url}{path}", timeout=5)
+            response = requests.request(
+                method,
+                f"{self.control_api_url}{path}",
+                headers=_auth_headers(),
+                json=payload or None,
+                params=query or None,
+                timeout=5,
+                verify=self.verify_ssl,
+            )
             response.raise_for_status()
             return response.json()
         except Exception as exc:
             self.logger.warning("Control API unavailable: %s", exc)
             return default
+
+    def set_metaapi_credentials(self, token: str, account_id: str):
+        """Persist encrypted MetaApi credentials for the current tenant."""
+        if not self.user_id:
+            return False, "Login required"
+        try:
+            self.auth_store.save_credentials(self.user_id, token, account_id)
+        except AuthError as exc:
+            return False, str(exc)
+        self.config.metaapi_token = token.strip()
+        self.config.metaapi_account_id = account_id.strip()
+        if self.control_api_url:
+            result = self._control_request(
+                "POST",
+                "/api/credentials",
+                {"success": False, "message": "Control API unavailable"},
+                json={
+                    "metaapi_token": self.config.metaapi_token,
+                    "metaapi_account_id": self.config.metaapi_account_id,
+                },
+            )
+            return bool(result.get("success")), result.get("message", "Credentials applied")
+        return True, "Credentials saved"
 
     def start_bot(self):
         """Start the bot in a separate thread"""
@@ -127,7 +201,7 @@ class BotController:
         from metaapi_cloud_sdk import MetaApi
 
         try:
-            config = BotConfig.from_file(str(self.config_path))
+            config = self.auth_store.get_config(self.user_id)
 
             # Initialize MetaApi
             api = MetaApi(token=config.metaapi_token)
@@ -163,7 +237,7 @@ class BotController:
         """Get current bot status"""
         api_status = self._control_request("GET", "/api/status", None)
         if api_status:
-            self.config = BotConfig.from_file(str(self.config_path))
+            self.config = self.auth_store.get_config(self.user_id)
             return {
                 "running": bool(api_status.get("running")),
                 "starting": bool(api_status.get("starting")),
@@ -225,10 +299,13 @@ class BotController:
     def save_config(self, config: BotConfig):
         """Save configuration to file"""
         try:
-            config.save(str(self.config_path))
+            if self.user_id:
+                self.auth_store.save_config(self.user_id, config)
+            else:
+                config.save(str(self.config_path))
             self.config = config
             if self.control_api_url:
-                self._control_request("POST", "/api/reload-config", None)
+                self._control_request("POST", "/api/config", None, json={"config": config.to_dict(include_secrets=False)})
             self.logger.info("Configuration saved successfully")
             return True, "Configuration saved successfully"
         except Exception as e:
@@ -238,7 +315,7 @@ class BotController:
     def reload_config(self):
         """Reload configuration from file"""
         try:
-            self.config = BotConfig.from_file(str(self.config_path))
+            self.config = self.auth_store.get_config(self.user_id)
             if self.control_api_url:
                 result = self._control_request("POST", "/api/reload-config", None)
                 if result and result.get("instruments"):
@@ -249,18 +326,25 @@ class BotController:
             self.logger.error(f"Failed to reload configuration: {e}")
             return False
 
-# Initialize bot controller
-if "bot_controller" not in st.session_state:
-    st.session_state.bot_controller = BotController()
-
-bot_controller = st.session_state.bot_controller
+bot_controller = None
 
 def main():
     if not check_password():
         st.stop()
 
+    current_user = st.session_state.get("user")
+    if (
+        "bot_controller" not in st.session_state
+        or st.session_state.bot_controller.user_id != current_user.user_id
+    ):
+        st.session_state.bot_controller = BotController()
+
+    global bot_controller
+    bot_controller = st.session_state.bot_controller
+
     # Sidebar
     st.sidebar.title("📊 Citadel Bot Dashboard")
+    st.sidebar.caption(f"Signed in as {current_user.email}")
     st.sidebar.markdown("---")
 
     # Bot Control
@@ -289,6 +373,12 @@ def main():
     if status.get("running") and status.get("mode") != bot_controller.config.mode:
         st.sidebar.caption(f"Running bot is still {status['mode'].upper()}; restart to apply.")
     st.sidebar.metric("Instruments", len(bot_controller.config.instruments))
+    if st.sidebar.button("Logout"):
+        bot_controller.stop_bot()
+        get_auth_store().revoke_session(st.session_state.get("session_token", ""))
+        for key in ("session_token", "user", "bot_controller"):
+            st.session_state.pop(key, None)
+        st.rerun()
 
     # Navigation
     st.sidebar.markdown("---")
@@ -641,20 +731,25 @@ def show_settings():
     with tab5:
         st.subheader("MetaApi Connection")
 
-        st.info("On Render, set CITADEL_METAAPI_TOKEN and CITADEL_METAAPI_ACCOUNT_ID as environment variables.")
+        has_credentials = bot_controller.auth_store.has_credentials(bot_controller.user_id)
+        st.info("MetaApi tokens are encrypted at rest and are never written to config.yaml.")
         metaapi_account_id = st.text_input("Account ID", value=bot_controller.config.metaapi_account_id, key="settings_metaapi_account_id")
-        metaapi_token = st.text_input("Token", type="password", value=bot_controller.config.metaapi_token, key="settings_metaapi_token")
+        metaapi_token = st.text_input("Token", type="password", value="", key="settings_metaapi_token")
+        if has_credentials:
+            st.caption("A token is already saved. Enter a new token only when rotating credentials.")
 
-        st.warning("⚠️ Use env vars in production")
+        st.warning("Use environment variables or your deployment secret store in production.")
 
-        if st.button("💾 Save", width='stretch', key="settings_metaapi_save"):
-            bot_controller.config.metaapi_account_id = metaapi_account_id
-            bot_controller.config.metaapi_token = metaapi_token
-            success, msg = bot_controller.save_config(bot_controller.config)
-            if success:
-                st.success(f"✅ {msg}")
+        if st.button("Apply Credentials", width='stretch', key="settings_metaapi_save"):
+            if not metaapi_account_id.strip() or (not has_credentials and not metaapi_token.strip()):
+                st.error("MetaApi token and account ID are required.")
             else:
-                st.error(f"❌ {msg}")
+                token_to_save = metaapi_token or bot_controller.config.metaapi_token
+                success, msg = bot_controller.set_metaapi_credentials(token_to_save, metaapi_account_id)
+                if success:
+                    st.success(msg)
+                else:
+                    st.error(msg)
 
 def show_trading_status():
     st.title("💰 Trading Status")

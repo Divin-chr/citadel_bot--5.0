@@ -17,7 +17,8 @@ log = get_logger("dashboard_service")
 class DashboardService:
     """Read-only service layer for dashboard status and analytics."""
 
-    def __init__(self):
+    def __init__(self, user_id: Optional[int] = None):
+        self.user_id = user_id
         self.connection = None
         self.db_connected = False
 
@@ -109,9 +110,10 @@ class DashboardService:
                         sl.rejection_gate
                     FROM signal_logs sl
                     LEFT JOIN instruments i ON sl.instrument_id = i.instrument_id
+                    WHERE ($2::integer IS NULL OR sl.user_id = $2)
                     ORDER BY sl.timestamp_utc DESC
                     LIMIT $1
-                """, limit)
+                """, limit, self.user_id)
             return pd.DataFrame([{
                 "Timestamp": row["timestamp_utc"],
                 "Symbol": row["symbol"] or "Unknown",
@@ -146,9 +148,10 @@ class DashboardService:
                         tl.note
                     FROM trade_ledger tl
                     LEFT JOIN instruments i ON tl.instrument_id = i.instrument_id
+                    WHERE ($2::integer IS NULL OR tl.user_id = $2)
                     ORDER BY tl.timestamp_utc DESC
                     LIMIT $1
-                """, limit)
+                """, limit, self.user_id)
             return pd.DataFrame([{
                 "Timestamp": row["timestamp_utc"],
                 "Event": row["event_type"],
@@ -178,7 +181,8 @@ class DashboardService:
                         AVG(confidence) AS avg_confidence
                     FROM signal_logs
                     WHERE timestamp_utc > NOW() - INTERVAL '24 hours'
-                """)
+                      AND ($1::integer IS NULL OR user_id = $1)
+                """, self.user_id)
             return {
                 "total_signals": row["total_signals"] or 0,
                 "emitted_signals": row["emitted_signals"] or 0,
@@ -202,7 +206,8 @@ class DashboardService:
                     FROM trade_ledger
                     WHERE event_type = 'POSITION_CLOSED'
                       AND timestamp_utc > NOW() - INTERVAL '24 hours'
-                """)
+                      AND ($1::integer IS NULL OR user_id = $1)
+                """, self.user_id)
             total = row["total_trades"] or 0
             wins = row["winning_trades"] or 0
             win_rate = (wins / total * 100) if total else 0
@@ -232,9 +237,10 @@ class DashboardService:
                     LEFT JOIN trade_ledger tl ON i.instrument_id = tl.instrument_id
                         AND tl.event_type = 'POSITION_CLOSED'
                         AND tl.timestamp_utc > NOW() - INTERVAL '24 hours'
+                        AND ($1::integer IS NULL OR tl.user_id = $1)
                     GROUP BY i.symbol
                     ORDER BY total_pnl DESC NULLS LAST
-                """)
+                """, self.user_id)
             data = []
             for row in rows:
                 trades = row["trades"] or 0

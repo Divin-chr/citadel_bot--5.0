@@ -3,15 +3,14 @@ data_pipeline.py — Real-time and historical data feed via MetaApi
 Now with PostgreSQL persistence for zero-downtime operation
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 from pathlib import Path
 from typing import Dict, Optional, List
 
-import pandas as pd
-
 from citadel_bot.config import BotConfig
-from citadel_bot.database.database_manager import db_manager
 
 log = logging.getLogger("pipeline")
 
@@ -39,7 +38,7 @@ class DataPipeline:
         self._analysis_window_bars = max(self.config.history_bars, 5000)
         self._db_available = False
 
-    async def get_realtime(self, sym: str) -> Optional[pd.DataFrame]:
+    async def get_realtime(self, sym: str) -> Optional['pd.DataFrame']:
         """Return latest rolling bars and refresh from MT5 on each call."""
         await self._refresh_symbol(sym)
         df = self._bars.get(sym)
@@ -58,6 +57,9 @@ class DataPipeline:
 
     async def start_feeds(self):
         """Warm up data windows for all configured symbols."""
+        import pandas as pd
+        from citadel_bot.database.database_manager import db_manager
+
         # Check database availability
         self._db_available = await db_manager.health_check()
         if self._db_available:
@@ -80,8 +82,11 @@ class DataPipeline:
             df = self._bars.get(sym, pd.DataFrame())
             log.info("[%s] History loaded: %s bars", sym, len(df))
 
-    async def _load_from_database(self, sym: str) -> Optional[pd.DataFrame]:
+    async def _load_from_database(self, sym: str) -> Optional['pd.DataFrame']:
         """Load historical data from database"""
+        import pandas as pd
+        from citadel_bot.database.database_manager import db_manager
+
         if not self._db_available:
             return None
 
@@ -130,6 +135,7 @@ class DataPipeline:
 
     async def _refresh_symbol(self, sym: str):
         try:
+            import pandas as pd
             from datetime import datetime, timedelta
             end_time = datetime.utcnow()
             start_time = end_time - timedelta(minutes=self.config.history_bars)
@@ -152,13 +158,14 @@ class DataPipeline:
         except Exception as exc:
             log.error("[%s] MetaApi refresh error: %s", sym, exc)
 
-    def _persist_symbol_data(self, sym: str, new_m1: pd.DataFrame):
+    def _persist_symbol_data(self, sym: str, new_m1: 'pd.DataFrame'):
         """
         Persist all received 1-minute bars to both CSV (fallback) and database (primary):
           - {sym}_m1.csv (fallback)
           - PostgreSQL market_data table (primary)
           - Aggregated CSV files (h1, d1, w1) for compatibility
         """
+        import pandas as pd
         m1_path = self._data_dir / f"{sym}_m1.csv"
         if sym not in self._persisted_m1:
             if m1_path.exists():
@@ -189,8 +196,9 @@ class DataPipeline:
             agg = merged.resample(rule).agg(agg_map).dropna()
             agg.to_csv(self._data_dir / f"{sym}_{suffix}.csv")
 
-    async def _persist_to_database(self, sym: str, df: pd.DataFrame):
+    async def _persist_to_database(self, sym: str, df: 'pd.DataFrame'):
         """Persist market data to database asynchronously"""
+        from citadel_bot.database.database_manager import db_manager
         try:
             instrument_id = await db_manager.get_instrument_id(sym)
             if not instrument_id:
@@ -215,7 +223,8 @@ class DataPipeline:
         except Exception as e:
             log.error("[%s] Failed to persist to database: %s", sym, e)
 
-    def _load_persisted_m1(self, sym: str) -> Optional[pd.DataFrame]:
+    def _load_persisted_m1(self, sym: str) -> Optional['pd.DataFrame']:
+        import pandas as pd
         m1_path = self._data_dir / f"{sym}_m1.csv"
         if not m1_path.exists():
             return None

@@ -350,6 +350,7 @@ class ExecutionEngine:
         if self._db_available:
             trade_data = {
                 "timestamp_utc": timestamp_utc,
+                "user_id": self.config.user_id,
                 "event_type": event_type,
                 "mode": self.config.mode,
                 "instrument_id": None,

@@ -1,0 +1,13 @@
+version: "3.9"
+
+services:
+  citadel:
+    environment:
+      CITADEL_CONTROL_API_SCHEME: "http"
+      CITADEL_CONTROL_API_HOST: "127.0.0.1"
+      CITADEL_CONTROL_API_PORT: "8765"
+      CITADEL_CONTROL_API_PATH: "/api"
+      CITADEL_DASHBOARD_BASE_PATH: "/dashboard"
+    labels:
+      - "traefik.http.routers.citadel-api.rule=Host(`app.localhost`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.citadel-dashboard.rule=Host(`app.localhost`) && PathPrefix(`/dashboard`)"

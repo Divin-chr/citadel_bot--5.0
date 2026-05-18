@@ -8,7 +8,7 @@ Download and install PostgreSQL 18 from:
 https://www.postgresql.org/download/windows/
 
 During installation:
-- Choose password: `citadel123` (or remember your choice)
+- Choose a strong unique password and store it in `CITADEL_DATABASE_PASSWORD` or your deployment secret store.
 - Keep default port: 5432
 - Install pgAdmin (optional, but helpful)
 
@@ -51,7 +51,7 @@ DB_CONFIG = {
     'host': 'localhost',
     'port': 5432,
     'user': 'postgres',
-    'password': 'your_actual_password_here',  # ← Change this
+    'password': os.getenv('CITADEL_DATABASE_PASSWORD', ''),
     'database': 'postgres'
 }
 ```

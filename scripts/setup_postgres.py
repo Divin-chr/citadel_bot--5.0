@@ -7,6 +7,7 @@ Diagnoses and fixes PostgreSQL connection issues
 import subprocess
 import os
 import sys
+import getpass
 from pathlib import Path
 
 def run_command(cmd, shell=True):
@@ -67,13 +68,20 @@ def setup_postgres_user():
     # First try with no password (trust authentication)
     if check_psql_connection():
         # Set a password for postgres user
+        password = os.environ.get("CITADEL_DATABASE_PASSWORD") or getpass.getpass(
+            "   Enter a new PostgreSQL password for user 'postgres': "
+        )
+        if not password:
+            print("   Password cannot be empty")
+            return None
         print("   Setting password for postgres user...")
-        alter_cmd = [psql_path, "-U", "postgres", "-c", "ALTER USER postgres PASSWORD 'citadel123';"]
+        escaped = password.replace("'", "''")
+        alter_cmd = [psql_path, "-U", "postgres", "-c", f"ALTER USER postgres PASSWORD '{escaped}';"]
         returncode, stdout, stderr = run_command(alter_cmd, shell=False)
 
         if returncode == 0:
-            print("   Password set for postgres user: 'postgres'")
-            return 'postgres'
+            print("   Password set for postgres user")
+            return password
         else:
             print(f"   Failed to set password: {stderr}")
             return None
@@ -128,34 +136,11 @@ def create_schema(password):
         return False
 
 def update_config_file(password):
-    """Update database_manager.py with correct password"""
+    """Keep database credentials out of source files."""
     print("6. Updating Configuration...")
-
-    config_file = Path("citadel_bot/database/database_manager.py")
-    if not config_file.exists():
-        print("   database_manager.py not found")
-        return False
-
-    try:
-        with open(config_file, 'r', encoding='utf-8') as f:
-            content = f.read()
-
-        # Update password
-        old_config = f"'password': '{password}'" if f"'password': ''" in content else None
-        if old_config:
-            new_content = content.replace(f"'password': ''", f"'password': '{password}'")
-        else:
-            new_content = content.replace("'password': '',", f"'password': '{password}',")
-
-        with open(config_file, 'w', encoding='utf-8') as f:
-            f.write(new_content)
-
-        print("   Configuration updated with database password")
-        return True
-
-    except Exception as e:
-        print(f"   Failed to update config: {e}")
-        return False
+    print("   Source files were not modified.")
+    print("   Set CITADEL_DATABASE_PASSWORD in your environment or secret store.")
+    return True
 
 def test_database_connection(password):
     """Test full database connection"""
@@ -218,8 +203,7 @@ def main():
     print("1. Run migration: python migrate_to_postgres.py")
     print("2. Test queries: python simple_db_queries.py")
     print("3. Run analytics: python database_analytics_simple.py")
-    print("\nDatabase password set to: citadel123")
-    print("You can change this in database_manager.py if needed.")
+    print("\nDatabase password was set. Keep it in CITADEL_DATABASE_PASSWORD or your secret store.")
 
     return True
 

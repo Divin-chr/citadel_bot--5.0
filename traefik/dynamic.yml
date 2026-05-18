@@ -1,0 +1,28 @@
+http:
+  routers:
+    citadel-dashboard:
+      rule: "Host(`app.yourdomain.com`) && PathPrefix(`/dashboard`)"
+      entryPoints:
+        - websecure
+      service: citadel-dashboard
+      tls:
+        certResolver: le
+
+    citadel-api:
+      rule: "Host(`app.yourdomain.com`) && PathPrefix(`/api`)"
+      entryPoints:
+        - websecure
+      service: citadel-api
+      tls:
+        certResolver: le
+
+  services:
+    citadel-dashboard:
+      loadBalancer:
+        servers:
+          - url: "http://citadel:8501"
+
+    citadel-api:
+      loadBalancer:
+        servers:
+          - url: "http://citadel:8080"

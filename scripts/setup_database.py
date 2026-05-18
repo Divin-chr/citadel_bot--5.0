@@ -100,31 +100,9 @@ def setup_database():
         print(f"❌ Error creating schema: {e}")
         return False
 
-    # 3. Update database config
-    print("\n3. Updating database configuration...")
-    config_lines = []
-    config_file = Path("citadel_bot/database/database_manager.py")
-
-    if config_file.exists():
-        with open(config_file, 'r', encoding='utf-8') as f:
-            config_lines = f.readlines()
-
-        # Update password in config
-        updated = False
-        for i, line in enumerate(config_lines):
-            if "'password':" in line:
-                config_lines[i] = f"            'password': '{password}',\n"
-                updated = True
-                break
-
-        if updated:
-            with open(config_file, 'w', encoding='utf-8') as f:
-                f.writelines(config_lines)
-            print("✅ Database configuration updated")
-        else:
-            print("⚠️  Could not update database configuration automatically")
-    else:
-        print("⚠️  database_manager.py not found, please update password manually")
+    # 3. Keep database config in the environment, not source files.
+    print("\n3. Database configuration...")
+    print("Set CITADEL_DATABASE_PASSWORD in your environment or deployment secret store.")
 
     print("\n✅ Database setup complete!")
     print("\nNext steps:")

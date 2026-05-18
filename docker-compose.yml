@@ -1,0 +1,57 @@
+version: "3.9"
+
+services:
+  traefik:
+    image: traefik:latest
+    container_name: traefik
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.file.filename=/etc/traefik/dynamic.yml
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --api.dashboard=true
+      - --api.insecure=false
+      - --log.level=INFO
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+      - ./traefik/acme.json:/acme/acme.json
+    networks:
+      - citadel
+
+  citadel:
+    build: .
+    container_name: citadel-bot
+    restart: unless-stopped
+    environment:
+      PORT: "8080"
+      CITADEL_RUN_DASHBOARD: "true"
+      CITADEL_CONTROL_PORT: "8765"
+      CITADEL_CONTROL_API_KEY: "replace_with_secure_random_value"
+      CITADEL_CONTROL_API_SCHEME: "https"
+      CITADEL_CONTROL_API_HOST: "app.yourdomain.com"
+      CITADEL_CONTROL_API_PORT: "443"
+      CITADEL_CONTROL_API_PATH: "/api"
+      CITADEL_DASHBOARD_BASE_PATH: "/dashboard"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.citadel-api.rule=Host(`app.yourdomain.com`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.citadel-api.entrypoints=websecure"
+      - "traefik.http.routers.citadel-api.tls=true"
+      - "traefik.http.services.citadel-api.loadbalancer.server.port=8080"
+      - "traefik.http.routers.citadel-dashboard.rule=Host(`app.yourdomain.com`) && PathPrefix(`/dashboard`)"
+      - "traefik.http.routers.citadel-dashboard.entrypoints=websecure"
+      - "traefik.http.routers.citadel-dashboard.tls=true"
+      - "traefik.http.services.citadel-dashboard.loadbalancer.server.port=8501"
+    networks:
+      - citadel
+
+networks:
+  citadel:
+    driver: bridge
